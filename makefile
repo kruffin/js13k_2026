@@ -1,4 +1,4 @@
-version := 0.0.1
+version := 1.0.0
 FILE_NAME=u6s_and_r6s
 
 CHECK_FILE_SIZE= (\
