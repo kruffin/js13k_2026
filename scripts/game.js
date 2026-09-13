@@ -363,9 +363,13 @@ const applyForces = function(obj, dt) {
       loadLevel(tile.levelIdx); // HACK: This is going to cause problems.
       return;
     } else if (tile.damage != null && aabb(collider, tbounds) && obj.itime <= 0) {
-      obj.health -= tile.damage;
-      obj.itime = obj.invulnTime;
-      obj.hitMusic && obj.hitMusic();
+      if (obj.takeDamage) {
+        obj.takeDamage(tile.damage);
+      } else {
+        obj.health -= tile.damage;
+        obj.itime = obj.invulnTime;
+        obj.hitMusic && obj.hitMusic();
+      }
     }
   }
 
@@ -1368,6 +1372,7 @@ const drawWorldLayer = function(layer) {
 };
 
 const drawPlayer = function(player) {
+  if (player.animIdx == null) return;
   context.save();
   const fx = (player.flipx ? -1 : 1) * gameState.camera.zoom;
   const fy = gameState.camera.zoom;
