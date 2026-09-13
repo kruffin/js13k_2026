@@ -1,0 +1,881 @@
+<!DOCTYPE html>
+<html>
+<!-- 
+  Copyright (c) 2025 Kevin Ruffin
+  Copyright (c) 2015 Steven Lambert in sections marked.
+
+  This program is free software: you can redistribute it and/or modify it under 
+  the terms of the GNU Affero General Public License as published by the Free 
+  Software Foundation, either version 3 of the License, or (at your option) any 
+  later version.
+
+  This program is distributed in the hope that it will be useful, but WITHOUT ANY
+  WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+  PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
+
+  You should have received a copy of the GNU Affero General Public License along 
+  with this program. If not, see <https://www.gnu.org/licenses/>. 
+-->
+
+<body style="margin:0">
+    <div style="display:grid;grid-template-columns: 1fr 1fr;">
+      <canvas id="game" style=""></canvas>
+      <div style="align-self:start;">
+        <!-- <input id="cur-color" style="align-self:start;" type="color"/><br/> -->
+        <label>Red:</label><input id="in-red" type="number" min=0 max=255 step=1/><br/>
+        <label>Green:</label><input id="in-green" type="number" min=0 max=255 step=1/><br/>
+        <label>Blue:</label><input id="in-blue" type="number" min=0 max=255 step=1/><br/>
+        <input id="set-color-btn" type="button" value="Set Color"/>
+        <input id="reset-color-btn" type="button" value="Revert Color"/><br/>
+        <textarea id="palette-diff" rows=10></textarea><br/>
+        <input id="set-palette-override-btn" type="button" value="Set Palette Overrides"/>
+        <!-- <input id="palette-diff" type="text" disabled="true" value="{}"/> -->
+      </div>
+    </div>
+    <script type="module">
+      const FILE_NAME = '../assets/tiles.png';
+      const FILE_WIDTH = 128;
+      const FILE_HEIGHT = 128;
+      let canvas = document.getElementById("game");
+      let context = canvas.getContext('2d');
+      let _colorInputs = {
+        r: document.getElementById('in-red'),
+        g: document.getElementById('in-green'),
+        b: document.getElementById('in-blue'),
+        setBtn: document.getElementById('set-color-btn'),
+        resetBtn: document.getElementById('reset-color-btn'),
+        diffText: document.getElementById('palette-diff'),
+        palOverrideBtn: document.getElementById('set-palette-override-btn'),
+      };
+      let _cscale = 4;
+      canvas.width = FILE_WIDTH * _cscale * 2;//48 * _cscale * 2;
+      canvas.height = (FILE_HEIGHT + 5 + 10*5) * _cscale;
+      context.scale(_cscale, _cscale);
+      context.imageSmoothingEnabled = false;
+      let _imageCache = {};
+      let _spritesheets = {};
+      let _mouse = {x:0,y:0};
+
+      canvas.addEventListener('mousemove', (evt) => {
+       let rect = canvas.getBoundingClientRect();
+       _mouse.x = (evt.clientX - rect.left) / _cscale; //+ _map.x,
+       _mouse.y = (evt.clientY - rect.top) / _cscale; // + _map.y
+  
+       // console.log({x: _mouse.x * _cscale, y: _mouse.y * _cscale});
+       // console.log(_mouse);
+      });
+      canvas.addEventListener('mouseup', (evt) => {
+        if (evt.button == 0) {
+          _mouse.leftClick = true;
+        }
+      });
+
+      const getColorKey = function(r, g, b, noCell) {
+        // Jack-ass advertisers ruining the world yet again:
+        // https://www.h3xed.com/programming/javascript-canvas-getimagedata-pixel-colors-slightly-off-in-firefox
+        // Since pixels are randomly jittered by a little bit, just box things in cells of 10 so 
+        // the jitter is effectively ignored. Lose some resolution, but should work for the government.
+        const COLOR_CELL_SIZE = noCell ? 1 : 10;
+        return parseInt(Math.floor(r/COLOR_CELL_SIZE)*COLOR_CELL_SIZE).toString(16).padStart(2, '0') +
+               parseInt(Math.floor(g/COLOR_CELL_SIZE)*COLOR_CELL_SIZE).toString(16).padStart(2, '0') +
+               parseInt(Math.floor(b/COLOR_CELL_SIZE)*COLOR_CELL_SIZE).toString(16).padStart(2, '0');
+      };
+      const parseColorKey = function(key) {
+        let rgb = key.match(/([a-fA-F0-9]{2})([a-fA-F0-9]{2})([a-fA-F0-9]{2})/);
+        return [
+          parseInt(rgb[1], 16),
+          parseInt(rgb[2], 16),
+          parseInt(rgb[3], 16)
+        ];
+      }
+      const loadImage = function(url) {
+          return new Promise( (resolve, reject) => {
+              if (_imageCache[url]) {
+                  return resolve(_imageCache[url]);
+              }
+
+              let image = new Image();
+              image.onload = function () {
+                  let fullUrl = new URL(url, window.location.href).href;
+                  _imageCache[url] = _imageCache[fullUrl] = this;
+                  resolve(this);
+              };
+              image.onerror = function() {
+                  reject(url);
+              };
+              image.src = url;
+          });
+      };
+
+      const load = function( ...urls ) {
+          return Promise.all(urls.map(asset => {return loadImage(asset);}));
+      };
+
+      const cloneAnimations = function(anim_obj) {
+          let anims = {};
+          for (let key in anim_obj) {
+              anims[key] = anim_obj[key].clone();
+          }
+          return anims;
+      };
+
+      const recolorImage = function(inimg, palette) {
+        var ocanvas = new OffscreenCanvas(inimg.width, inimg.height);
+        let ctx = ocanvas.getContext('2d');
+        // ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(inimg, 0, 0);
+        let pixdata = ctx.getImageData(0, 0, inimg.width, inimg.height);
+
+        for (let pidx = 0; pidx < pixdata.data.length; pidx += 4) {
+          let key = getColorKey(pixdata.data[pidx], pixdata.data[pidx+1], pixdata.data[pidx+2]);
+
+          if (Object.keys(palette).includes(key)) {
+            // let rgb = palette[key].match(/([a-fA-F0-9]{2})([a-fA-F0-9]{2})([a-fA-F0-9]{2})/);
+            // pixdata.data[pidx    ] = parseInt(rgb[1], 16);
+            // pixdata.data[pidx + 1] = parseInt(rgb[2], 16);
+            // pixdata.data[pidx + 2] = parseInt(rgb[3], 16);
+            let rgb = parseColorKey(palette[key]);
+            pixdata.data[pidx    ] = rgb[0];
+            pixdata.data[pidx + 1] = rgb[1];
+            pixdata.data[pidx + 2] = rgb[2];
+          }
+        }
+
+        ctx.putImageData(pixdata, 0, 0);
+
+        let oimg = ocanvas.transferToImageBitmap();
+
+        return oimg;
+      };
+
+      const getImagePalette = function(inimg) {
+        var ocanvas = new OffscreenCanvas(inimg.width, inimg.height);
+
+        let ctx = ocanvas.getContext('2d');
+        ctx.drawImage(inimg, 0, 0);
+        let pixdata = ctx.getImageData(0, 0, inimg.width, inimg.height);
+
+        let curpalette = {};
+        for (let pidx = 0; pidx < pixdata.data.length; pidx += 4) {
+          let key = getColorKey(pixdata.data[pidx], pixdata.data[pidx+1], pixdata.data[pidx+2]);
+          curpalette[key] = {
+            r: pixdata.data[pidx], 
+            g: pixdata.data[pidx+1], 
+            b: pixdata.data[pidx+2]
+          };
+        }
+
+        return curpalette;
+      };
+
+      const drawText = function (txt, pos, font/*="22px serif"*/) {
+        context.save();
+        context.font = font;
+        context.fillText(txt, pos.x, pos.y);
+        context.restore();
+      };
+
+      class MySprite {
+        /**
+         * Hacked up and heavily modified version of Kontra's Sprite class.
+         * 
+         * The MIT License (MIT)
+         * 
+         * Copyright (c) 2015 Steven Lambert
+         * 
+         * Permission is hereby granted, free of charge, to any person obtaining a copy
+         * of this software and associated documentation files (the "Software"), to deal
+         * in the Software without restriction, including without limitation the rights
+         * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+         * copies of the Software, and to permit persons to whom the Software is
+         * furnished to do so, subject to the following conditions:
+         * 
+         * The above copyright notice and this permission notice shall be included in
+         * all copies or substantial portions of the Software.
+         * 
+         * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+         * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+         * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+         * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+         * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+         * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+         * THE SOFTWARE.
+         */
+        constructor(properties) {
+          this.init(properties);
+          this.initialize();
+        }
+
+        init(properties) {
+          Object.assign(this,{
+              x:0,y:0,dx:0,dy:0,ddx:0,ddy:0,anchor:{x:0,y:0},ttl:Infinity,scaleX:1,scaleY:1,parent:null,visible:true,
+              world:{x:0,y:0,width:0,height:0,scaleX: properties.scaleX || 1,scaleY: properties.scaleY || 1},
+              hurtWidth:0, hurtHeight:0,flipy:false,flipx:false,
+          });
+          Object.assign(this, properties);
+
+          if ('animations' in properties) {
+              this.animations = cloneAnimations(properties.animations);
+              this.currentAnimation = this.animations[Object.keys(this.animations)[0]];
+              this.width = this.currentAnimation.width;
+              this.height = this.currentAnimation.height;
+          }
+          // this.hurtBox = new MyBoundingRect({
+          //  parent: this,
+          //  center: {x: 0, y: 0},
+          //  width: this.hurtWidth,
+          //  height: this.hurtHeight,
+          // })
+        }
+
+        initialize() {}
+
+        isAlive() {
+          return this.ttl > 0;
+        }
+
+        addChild(c) {
+          let arr = this.objects || [];
+          c.parent = this;
+              arr.push(c);
+              this.objects = arr;
+        }
+
+        removeChild(c) {
+              let arr = this.objects || [];
+              let idx = arr.indexOf(c);
+              if (idx >= 0) {
+                  arr.splice(idx, 1);
+              }
+              c.parent = null;
+        }
+
+        update(dt=FRAME_DT) {
+          this.advance(dt);
+        }
+
+        advance(dt=FRAME_DT) {
+            this.dx += this.ddx * dt;
+            this.dy += this.ddy * dt;
+
+            this.x += this.dx * dt;
+            this.y += this.dy * dt;
+            // if (Math.abs(this.dx) > 0 || Math.abs(this.dy) > 0) {
+            //    this.world.dirty = true; // DEBT: assumes only the x/y pos changes
+            // }
+
+            this.ttl--;
+              this.currentAnimation?.update(dt);
+
+              let parent = this.parent?.world || {x:0,y:0,width:0,height:0,scaleX:1,scaleY:1/*,dirty:true*/};
+              // if (parent.dirty) {
+                  this.world.scaleX = this.scaleX * parent.scaleX;
+                  this.world.scaleY = this.scaleY * parent.scaleY;
+                  this.world.x = this.x + parent.x;
+                  this.world.y = this.y + parent.y;
+                  this.world.width = this.width * parent.scaleX;
+                  this.world.height = this.height * parent.scaleY;
+                  // this.world.dirty = true;
+              // } else {
+              //  this.world.dirty = false;
+              // }
+
+              (this.objects || []).forEach(o => o.update && o.update(dt));
+          }
+
+          playAnimation(name) {
+            this.currentAnimation?.stop();
+            this.currentAnimation = this.animations[name];
+            this.currentAnimation.start();
+          }
+
+          render() {
+              if (!this.visible) { return; }
+              context.save();
+              if (this.x || this.y) { context.translate(this.x, this.y); }
+
+              context.save();
+              if ('currentAnimation' in this) {
+                  let row = (this.currentAnimation.frames[this.currentAnimation._f] / this.currentAnimation.spriteSheet._f) | 0;
+                  let col = this.currentAnimation.frames[this.currentAnimation._f] % this.currentAnimation.spriteSheet._f | 0;
+                  // let fdir = ('facing_dir' in this) ? this.facing_dir : -1;
+                  let fx = (this.flipx ? -1 : 1);
+                  let fy = (this.flipy ? -1 : 1);
+                  context.scale(fx * this.scaleX, fy * this.scaleY);
+                  // if (fdir > 0) {
+                  //  context.scale(-this.scaleX, this.scaleY * fy);
+                  // } else {
+                  //  context.scale(this.scaleX, this.scaleY * fy);
+                  // }
+                  context.filter = (this?.invert) ? 'invert(1)' : '';
+                  // context.translate(fdir * this.currentAnimation.width * this.anchor.x, -1 * fy * this.currentAnimation.height * this.anchor.y);
+                  context.translate(-1 * fx * this.currentAnimation.width * this.anchor.x, -1 * fy * this.currentAnimation.height * this.anchor.y);
+                  context.drawImage(
+                      this.currentAnimation.spriteSheet.image,
+                      this.currentAnimation.margin + col * this.currentAnimation.width + (col * 2 + 1) * this.currentAnimation.spacing,
+                      this.currentAnimation.margin + row * this.currentAnimation.height + (row * 2 + 1) * this.currentAnimation.spacing,
+                      this.currentAnimation.width,
+                      this.currentAnimation.height,
+                      0,
+                      0,
+                      this.currentAnimation.width * fx,
+                      this.currentAnimation.height * fy,
+                      // this.currentAnimation.width * fdir * -1,
+                      // this.currentAnimation.height * (this.flipy ? -1 : 1),
+                  );
+              // } else if ('image' in this) {
+              //  context.scale(this.scaleX, this.scaleY);
+              //  context.translate(-this.image.width * this.anchor.x, -this.image.height * this.anchor.y);
+              //  context.drawImage(this.image, 0, 0, this.image.width, this.image.height);
+              } else if ('color' in this) {
+                  context.translate(-this.width * this.anchor.x, -this.height * this.anchor.y);
+                  context.fillStyle = this.color;
+                  if (this.shape == 'circle') {
+                      context.beginPath();
+                      context.arc(this.width * this.anchor.x, this.height * this.anchor.y, Math.min(this.width, this.height) * .5, 2 * Math.PI, false);
+                      context.fill();
+                  } else {
+                      context.fillRect(0, 0, this.width, this.height);
+                  }
+              }
+
+              context.restore();
+              (this.objects || []).forEach(o => o.render && o.render());
+              
+              context.restore();
+          }
+      };
+
+      class MyAnimation {
+        /**
+         * Hacked up and modified version of Kontra's GameLoop object.
+         * 
+         * The MIT License (MIT)
+         * 
+         * Copyright (c) 2015 Steven Lambert
+         * 
+         * Permission is hereby granted, free of charge, to any person obtaining a copy
+         * of this software and associated documentation files (the "Software"), to deal
+         * in the Software without restriction, including without limitation the rights
+         * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+         * copies of the Software, and to permit persons to whom the Software is
+         * furnished to do so, subject to the following conditions:
+         * 
+         * The above copyright notice and this permission notice shall be included in
+         * all copies or substantial portions of the Software.
+         * 
+         * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+         * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+         * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+         * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+         * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+         * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+         * THE SOFTWARE.
+         */
+        constructor({ spriteSheet, frames, frameRate, loop = true, name }) {
+          let {
+              width,
+              height,
+              spacing = 0,
+              margin = 0
+          } = spriteSheet.frame;
+
+          Object.assign(this, {
+            spriteSheet,
+            frames,
+            frameRate,
+            loop,
+            name,
+            width,
+            height,
+            spacing,
+            margin,
+            isStopped: false,
+
+            // f = frame, a = accumulator
+            _f: 0,
+            _a: 0
+          });
+        }
+
+        clone() {
+          return new MyAnimation(this);
+        }
+
+        start() {
+          this.isStopped = false;
+
+          if (!this.loop) {
+            this.reset();
+          }
+        }
+
+        stop() {
+          this.isStopped = true;
+        }
+
+        reset() {
+          this._f = 0;
+          this._a = 0;
+        }
+
+        update(dt = 1 / 60) {
+          if (this.isStopped) {
+            return;
+          }
+
+          // if the animation doesn't loop we stop at the last frame
+          if (!this.loop && this._f == this.frames.length - 1) {
+            this.stop();
+            return;
+          }
+
+          this._a += dt;
+
+        // update to the next frame if it's time
+          while (this._a * this.frameRate >= 1) {
+            this._f = ++this._f % this.frames.length;
+            this._a -= 1 / this.frameRate;
+          }
+        }
+
+        render({
+          x,
+          y,
+          width = this.width,
+          height = this.height,
+          context = context
+        }) {
+          // get the row and col of the frame
+          let row = (this.frames[this._f] / this.spriteSheet._f) | 0;
+          let col = this.frames[this._f] % this.spriteSheet._f | 0;
+
+          context.drawImage(
+            this.spriteSheet.image,
+            this.margin + col * this.width + (col * 2 + 1) * this.spacing,
+            this.margin + row * this.height + (row * 2 + 1) * this.spacing,
+            this.width,
+            this.height,
+            x,
+            y,
+            width,
+            height
+          );
+        } 
+      };
+
+      class MySpriteSheet {
+        /**
+         * Hacked up and modified version of Kontra's GameLoop object.
+         * 
+         * The MIT License (MIT)
+         * 
+         * Copyright (c) 2015 Steven Lambert
+         * 
+         * Permission is hereby granted, free of charge, to any person obtaining a copy
+         * of this software and associated documentation files (the "Software"), to deal
+         * in the Software without restriction, including without limitation the rights
+         * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+         * copies of the Software, and to permit persons to whom the Software is
+         * furnished to do so, subject to the following conditions:
+         * 
+         * The above copyright notice and this permission notice shall be included in
+         * all copies or substantial portions of the Software.
+         * 
+         * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+         * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+         * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+         * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+         * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+         * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+         * THE SOFTWARE.
+         */
+        constructor({
+            image, 
+            frameWidth, 
+            frameHeight, 
+            spacing = 0, 
+            margin = 0, 
+            animations
+        } = {}) {
+          this.animations = {};
+          this.image = image;
+          this.frame = {
+              width: frameWidth,
+              height: frameHeight,
+              spacing,
+              margin,
+          };
+          this._f = ((image.width - margin) / frameWidth) | 0;
+          this.createAnimations(animations);
+        }
+
+        parseFrames(consecutiveFrames) {
+          // return a single number frame
+          // @see https://github.com/jed/140bytes/wiki/Byte-saving-techniques#coercion-to-test-for-types
+          if (+consecutiveFrames == consecutiveFrames) {
+              return consecutiveFrames;
+          }
+
+          let sequence = [];
+          let frames = consecutiveFrames.split('..');
+
+          // coerce string to number
+          // @see https://github.com/jed/140bytes/wiki/Byte-saving-techniques#coercion-to-test-for-types
+          let start = +frames[0];
+          let end = +frames[1];
+          let i = start;
+
+          // ascending frame order
+          if (start < end) {
+              for (; i <= end; i++) {
+                  sequence.push(i);
+              }
+          }
+          // descending order
+          else {
+              for (; i >= end; i--) {
+                  sequence.push(i);
+              }
+          }
+
+          return sequence;
+        }
+
+        createAnimations(animations) {
+          let sequence, name;
+
+          for (name in animations) {
+            let { frames, frameRate, loop } = animations[name];
+
+            // array that holds the order of the animation
+            sequence = [];
+
+            // @ifdef DEBUG
+            // if (frames == undefined) {
+            //  throw Error(
+            //  'Animation ' + name + ' must provide a frames property'
+            //  );
+            // }
+            // @endif
+
+            // add new frames to the end of the array
+            [].concat(frames).map(frame => {
+              sequence = sequence.concat(this.parseFrames(frame));
+            });
+
+            this.animations[name] = new MyAnimation({
+              spriteSheet: this,
+              frames: sequence,
+              frameRate,
+              loop,
+              name
+            });
+          }
+        }
+      };
+
+      class Palette {
+        constructor(properties) {
+          Object.assign(this, Object.assign(
+            {
+              x: 0,
+              y: 0,
+              world: {x:0,y:0,width:0,height:0,scaleX: 1,scaleY: 1},
+              pal: {},
+              cols: 16,
+              border: {l: .5, r: .5, t: .5, b: .5},
+              borderColor: 'black',
+              width: 4,
+              height: 4,
+            }, properties));
+          this.origPal = structuredClone(this.pal);
+          _colorInputs.resetBtn.addEventListener('click', this._resetPalette.bind(this, null));
+          _colorInputs.setBtn.addEventListener('click', this._setPalette.bind(this));
+          _colorInputs.palOverrideBtn.addEventListener('click', this._setPaletteOverride.bind(this));
+        }
+
+        _resetPalette(cell) {
+          if (cell == null && this.selectedCell == null) {
+            return;
+          }
+          let key = cell || this.selectedCell;
+
+          // let rgb = parseColorKey(key);
+          // this.pal[key].r = rgb[0];
+          // this.pal[key].g = rgb[1];
+          // this.pal[key].b = rgb[2];
+          this.pal[key].r = this.origPal[key].r;
+          this.pal[key].g = this.origPal[key].g;
+          this.pal[key].b = this.origPal[key].b;
+
+          _colorInputs.r.value = this.pal[key].r;
+          _colorInputs.g.value = this.pal[key].g;
+          _colorInputs.b.value = this.pal[key].b;
+        }
+
+        _setPalette() {
+          if (this.selectedCell == null) {
+            return;
+          }
+
+          let key = this.selectedCell;
+          this.pal[key].r = parseInt(_colorInputs.r.value);
+          this.pal[key].g = parseInt(_colorInputs.g.value);
+          this.pal[key].b = parseInt(_colorInputs.b.value);
+        }
+
+        _setPaletteOverride() {
+          let diff = this.getDifferences();
+          Object.keys(diff).forEach(key => {
+            this._resetPalette(key);
+          });
+
+          let np = JSON.parse(_colorInputs.diffText.value);
+          Object.keys(np).forEach(key => {
+            let rgb = np[key].match(/(\d+)[|](\d+)[|](\d+)/);
+            if (rgb != null) {
+              // Convert to new key type
+              rgb = [ 
+                      parseInt(rgb[1]),//.toString(16).padStart(2, '0'),
+                      parseInt(rgb[2]),//.toString(16).padStart(2, '0'),
+                      parseInt(rgb[3]),//.toString(16).padStart(2, '0')
+                    ];
+              let oldkeyrgb = key.match(/(\d+)[|](\d+)[|](\d+)/);
+              key = parseInt(oldkeyrgb[1]).toString(16).padStart(2, '0')+
+                    parseInt(oldkeyrgb[2]).toString(16).padStart(2, '0')+
+                    parseInt(oldkeyrgb[3]).toString(16).padStart(2, '0');
+            } else {
+              // rgb = np[key].match(/([a-fA-F0-9]{2})([a-fA-F0-9]{2})([a-fA-F0-9]{2})/);
+              rgb = parseColorKey(np[key]);
+              let keyp = parseColorKey(key); // rekey it since it probably didn't use cells
+              key = getColorKey(keyp[0], keyp[1], keyp[2]);
+            }
+            if (Object.keys(this.pal).includes(key)) {
+              this.pal[key].r = rgb[0];//parseInt(rgb[1], 16);
+              this.pal[key].g = rgb[1];//parseInt(rgb[2], 16);
+              this.pal[key].b = rgb[2];//parseInt(rgb[3], 16);
+            }
+          });
+          this.selectedCell = null;
+          _colorInputs.r.value = null;
+          _colorInputs.g.value = null;
+          _colorInputs.b.value = null;
+        }
+
+        getDifferences() {
+          return Object.keys(this.pal).filter( key => {
+            // let rgb = parseColorKey(key);
+
+            // return  rgb[0] != this.pal[key].r ||
+            //         rgb[1] != this.pal[key].g ||
+            //         rgb[2] != this.pal[key].b;
+            return  this.origPal[key].r != this.pal[key].r ||
+                    this.origPal[key].g != this.pal[key].g ||
+                    this.origPal[key].b != this.pal[key].b;
+          }).map( key => {
+            let obj = {};
+            // obj[key] = '' + this.pal[key].r + '|' + this.pal[key].g + '|' + this.pal[key].b;
+            obj[key] = getColorKey(this.pal[key].r,this.pal[key].g,this.pal[key].b, true); // don't use cells
+            return obj;
+          }).reduce( (acc, cur) => {
+            return Object.assign(acc, cur);
+          }, {});
+        }
+
+        pointIntesects(pos, col, row) {
+          let awidth = this.width + this.border.l + this.border.r;
+          let aheight = this.height + this.border.t + this.border.b;
+          return (pos.x - this.x) >= (awidth * col) && (pos.x - this.x) < (awidth * (col+1)) &&
+                 (pos.y - this.y) >= (aheight * row) && (pos.y - this.y) < (aheight * (row+1));
+        }
+        // update() {
+        //   this.borderColor = this.pointIntesects(_mouse) ? 'yellow' : 'black';
+        // }
+
+        render() {
+          context.save();
+          context.translate(this.x, this.y);
+          let arr = Object.keys(this.pal).map((k) => {
+            return Object.assign({key: k}, this.pal[k]);
+          }).sort( (a, b) => {
+            
+            // let ak = a.key.match(/([a-fA-F0-9]{2})([a-fA-F0-9]{2})([a-fA-F0-9]{2})/);
+            // let bk = b.key.match(/([a-fA-F0-9]{2})([a-fA-F0-9]{2})([a-fA-F0-9]{2})/);
+            // return (parseInt(ak[1],16) + parseInt(ak[2],16) + parseInt(ak[3],16)) - 
+                   // (parseInt(bk[1],16) + parseInt(bk[2],16) + parseInt(bk[3],16));
+            let ak = parseColorKey(a.key);
+            let bk = parseColorKey(b.key);
+            return (ak[0] + ak[1] + ak[2]) - (bk[0] + bk[1] + bk[2]);
+          });
+
+          for (let idx = 0; idx < arr.length; idx++) {
+            let r = Math.floor(idx / this.cols);
+            let c = idx % this.cols;
+            let v = arr[idx];
+            context.save();
+            let awidth = this.width + this.border.l + this.border.r;
+            let aheight = this.height + this.border.t + this.border.b;
+            context.translate(awidth * c, aheight * r);
+            let mouseOver = this.pointIntesects(_mouse,c,r);
+            if (mouseOver && _mouse.leftClick) {
+              // Update cell
+              this.selectedCell = v.key;
+              _colorInputs.r.value = v.r;
+              _colorInputs.g.value = v.g;
+              _colorInputs.b.value = v.b;
+            }
+            context.fillStyle = (this.selectedCell == v.key) ? 'yellow' : (mouseOver ? 'white' : 'black');//this.borderColor;
+            context.fillRect(0, 0, awidth, aheight);
+            context.fillStyle = '#' + 
+              v.r.toString(16).padStart(2, '0') + 
+              v.g.toString(16).padStart(2, '0') +
+              v.b.toString(16).padStart(2, '0');
+            context.translate(this.border.l, this.border.t);
+            context.fillRect(0, 0, awidth - this.border.l - this.border.r, 
+                                  aheight - this.border.t - this.border.b);
+            context.restore();
+          }
+          context.restore();
+        }
+      };
+
+      let start = function() {
+        let palette = new Palette({
+          pal: getImagePalette(_imageCache[FILE_NAME])
+        });
+        let orig = new MySprite({
+          animations: _spritesheets['all'].animations,
+          pointIntesects: function(pos) {
+            let awidth = this.width;
+            let aheight = this.height;
+            return (pos.x - this.x) >= 0 && (pos.x - this.x) < awidth &&
+                   (pos.y - this.y) >= 0 && (pos.y - this.y) < aheight;
+          },
+          update: function() {
+            if (this.pointIntesects(_mouse) && _mouse.leftClick) {
+              let data = context.getImageData(this.x*_cscale,this.y*_cscale,this.width * _cscale, this.height * _cscale);
+              let impoint = {x: Math.floor(_mouse.x - this.x) * _cscale, y: Math.floor(_mouse.y - this.y) * _cscale};
+              let pidx = impoint.x * 4 + impoint.y * data.width * 4;
+              // palette.selectedCell = '' + 
+              //                       data.data[pidx + 0] + '|' + 
+              //                       data.data[pidx + 1] + '|' + 
+              //                       data.data[pidx + 2];
+              palette.selectedCell = getColorKey(data.data[pidx + 0], 
+                                                 data.data[pidx + 1],
+                                                 data.data[pidx + 2]);
+              if (Object.keys(palette.pal).includes(palette.selectedCell)) {
+                _colorInputs.r.value = palette.pal[palette.selectedCell].r;
+                _colorInputs.g.value = palette.pal[palette.selectedCell].g;
+                _colorInputs.b.value = palette.pal[palette.selectedCell].b;
+              }
+            }
+          },
+        });
+        let recolor = new MySprite({
+          animations: _spritesheets['recolor'].animations,
+        });
+        orig.y = 5;
+        recolor.x = FILE_WIDTH;//48*2;
+        recolor.y = 5;
+
+        palette.x = Math.floor(canvas.width / 2 / _cscale - palette.cols / 2 * (palette.width + palette.border.l + palette.border.r));
+        palette.y = FILE_HEIGHT+5;
+        // Fill background
+        context.save();
+        context.globalCompositeOperation = 'destination-under';
+        context.fillStyle = '#334e1b';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.restore();
+        // End fill background
+        orig.render();
+        recolor.render();
+        palette.render();
+        drawText('Original', {x:30/2, y: 4}, '4px serif');
+        drawText('ReColor', {x:FILE_WIDTH + 30/2, y: 4}, '4px serif');
+
+        let loop = {
+          focused: true,
+          animFrameRef: null,
+          _oldDiff: {},
+          _frame: function() {
+            if (this.focused) {
+              orig.update();
+              // palette.update();
+              context.save();
+              context.globalCompositeOperation = 'destination-under';
+              context.fillStyle = '#334e1b';
+              context.fillRect(0, 0, canvas.width, canvas.height);
+              context.restore();
+              orig.render();
+              recolor.render();
+
+              palette.render();
+              drawText('Original', {x:30/2, y: 4}, '4px serif');
+              drawText('ReColor', {x:FILE_WIDTH + 30/2, y: 4}, '4px serif');
+              let diff = palette.getDifferences();
+              if ((Object.keys(diff).length != Object.keys(this._oldDiff).length) ||
+                 (Object.keys(diff).filter( (key) => {
+                    return diff[key] != this._oldDiff[key];
+                 }).length > 0)) {
+                this._oldDiff = diff;
+                recolor.currentAnimation.spriteSheet.image = recolorImage(_imageCache[FILE_NAME], diff);
+                _colorInputs.diffText.value = JSON.stringify(diff);
+              }
+              _mouse.leftClick = false;
+            }
+            this.animFrameRef = requestAnimationFrame(this._frame.bind(this))
+          },
+          start: function() {
+            if (this.animFrameRef == null) {
+              this.animFrameRef = requestAnimationFrame(this._frame.bind(this));
+            }
+          },
+          stop: function() {
+            if (this.animFrameRef != null) {
+              cancelAnimationFrame(this.animFrameRef);
+              this.animFrameRef = null;
+            }
+          }
+        };
+        window.addEventListener('focus', () => {
+          loop.focused = true;
+        });
+        window.addEventListener('blur', () => {
+          loop.focused = false;
+        });
+
+        loop.start();
+      };
+
+      load(FILE_NAME).then( () => {
+        _spritesheets['all'] = new MySpriteSheet({
+          image: _imageCache[FILE_NAME],
+          frameWidth: FILE_WIDTH,//48,
+          frameHeight: FILE_HEIGHT,// 48,
+          animations: {
+            idle: {
+              frames: [0,],
+              frameRate: 1,
+              loop: false,
+            },
+          }
+        });
+        _spritesheets['recolor'] = new MySpriteSheet({
+          image: _imageCache[FILE_NAME],
+          frameWidth: FILE_WIDTH,//48,
+          frameHeight: FILE_HEIGHT,//48,
+          animations: {
+            idle: {
+              frames: [0,],
+              frameRate: 1,
+              loop: false,
+            },
+          }
+        });
+
+        start();
+      });
+    </script>
+</body>
+</html>
